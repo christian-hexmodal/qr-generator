@@ -9,12 +9,12 @@ from PIL import Image, ImageDraw, ImageFont
 import qrcode
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
-from reportlab.lib.utils import ImageReader  # <-- added
+from reportlab.lib.utils import ImageReader  # needed for ReportLab image input
 
 st.set_page_config(page_title="Hexmodal QR Sticker Generator", page_icon="🔳", layout="centered")
 
 st.title("🔳 Hexmodal QR Sticker Generator")
-st.caption("Upload a CSV of Serial/URL and a black Hexmodal logo — get per-serial PDF + high-res PNG stickers with a hexagonal logo cutout.")
+st.caption("Upload a CSV of Serial/URL and an optional black Hexmodal logo — get per-serial PDF + high-res PNG stickers with a hexagonal logo cutout.")
 
 # Sidebar parameters
 st.sidebar.header("Sticker Settings")
@@ -32,7 +32,7 @@ st.sidebar.caption("Tip: Higher DPI & larger box size → crisper PNGs (bigger f
 
 st.subheader("1) Upload Inputs")
 csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
-logo_file = st.file_uploader("Black Hexmodal logo (PNG)", type=["png"])
+logo_file = st.file_uploader("Black Hexmodal logo (PNG) — optional", type=["png"])
 
 # Helpers
 def hex_points(size):
@@ -108,7 +108,6 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
 
     # Serial font sizing by target width
     draw = ImageDraw.Draw(canvas_img)
-    # Try bold font; fallback to default
     font = None
     for fname in ["arialbd.ttf", "Helvetica-Bold", "DejaVuSans-Bold.ttf", "Arial Bold.ttf"]:
         try:
@@ -119,7 +118,6 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     if font is None:
         font = ImageFont.load_default()
 
-    # Increase font size until width ≈ serial_width_ratio * qr_draw
     target_w = int(serial_width_ratio * qr_draw)
     size = 10
     while size < 1000:
@@ -137,7 +135,6 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
             break
         size += 2
 
-    # Final font
     font_final = f if 'f' in locals() else font
     bbox = draw.textbbox((0, 0), serial, font=font_final)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -147,7 +144,7 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     qr_y = px - side_margin - qr_draw
     canvas_img.paste(qr_resized, (qr_x, qr_y))
 
-    # Draw serial centered in top area
+    # Draw serial
     text_x = (px - w) // 2
     text_y = (text_area - h) // 2
     draw.text((text_x, text_y), serial, fill="black", font=font_final)
@@ -161,18 +158,14 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     pdf_bytes = BytesIO()
     page = (sticker_cm * cm, sticker_cm * cm)
     c = canvas.Canvas(pdf_bytes, pagesize=page)
-
-    # Serial in PDF
     from reportlab.pdfbase.pdfmetrics import stringWidth
     unit_w = stringWidth(serial, "Helvetica-Bold", 1)
-    font_sz = target_w / (dpi / 72.0) / unit_w if unit_w > 0 else 10  # convert pixel width target to points
-    # Cap by text area height in points
+    font_sz = target_w / (dpi / 72.0) / unit_w if unit_w > 0 else 10
     text_area_pt = (text_area / dpi) * 72.0
     font_sz = min(font_sz, text_area_pt * 0.9)
     c.setFont("Helvetica-Bold", font_sz)
     c.drawCentredString(page[0]/2, page[1] - text_area_pt + (text_area_pt - font_sz)/2, serial)
 
-    # Draw QR image into PDF (wrap bytes with ImageReader to avoid PIL image TypeError)
     qr_png = BytesIO()
     qr_resized.save(qr_png, format="PNG")
     qr_png.seek(0)
@@ -187,15 +180,14 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     return png_bytes, pdf_bytes
 
 st.subheader("2) Generate Stickers")
-if st.button("Generate") and csv_file and logo_file:
+if st.button("Generate") and csv_file:
     try:
         df = pd.read_csv(csv_file)
-        # Normalize headers
         df.columns = [c.strip().title() for c in df.columns]
         if "Serial" not in df.columns or "Url" not in df.columns:
             st.error("CSV must contain columns: Serial, URL")
         else:
-            logo_img = Image.open(logo_file).convert("RGBA")
+            logo_img = Image.open(logo_file).convert("RGBA") if logo_file else None
 
             png_zip_mem = BytesIO()
             pdf_zip_mem = BytesIO()
@@ -210,11 +202,10 @@ if st.button("Generate") and csv_file and logo_file:
                 if not serial or not url:
                     continue
 
-                # Build QR with logo cutout
                 qr = make_qr(url, ec_level, box_size=box_size, border=2)
-                qr = paste_logo_hex(qr, logo_img, logo_frac=logo_scale/100.0, padding=cutout_padding)
+                if logo_img:
+                    qr = paste_logo_hex(qr, logo_img, logo_frac=logo_scale/100.0, padding=cutout_padding)
 
-                # Compose sticker
                 png_bytes, pdf_bytes = compose_sticker(
                     serial, qr,
                     sticker_cm=sticker_size_cm,
@@ -222,11 +213,9 @@ if st.button("Generate") and csv_file and logo_file:
                     dpi=dpi
                 )
 
-                # Write to zips
                 png_zip.writestr(f"{serial}_sticker.png", png_bytes.getvalue())
                 pdf_zip.writestr(f"{serial}_sticker.pdf", pdf_bytes.getvalue())
 
-                # Preview the first three
                 if i < 3:
                     with preview_cols[i % 3]:
                         st.image(png_bytes.getvalue(), caption=serial, use_container_width=True)
@@ -241,4 +230,4 @@ if st.button("Generate") and csv_file and logo_file:
     except Exception as e:
         st.exception(e)
 else:
-    st.info("Upload your CSV and logo, then click **Generate**.")
+    st.info("Upload your CSV (and logo if desired), then click **Generate**.")
