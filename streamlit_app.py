@@ -33,6 +33,7 @@ st.sidebar.caption("Tip: Higher DPI & larger box size → crisper PNGs (bigger f
 st.subheader("1) Upload Inputs")
 csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
 logo_file = st.file_uploader("Black Hexmodal logo (PNG) — optional", type=["png"])
+bg_file = st.file_uploader("Background template (PNG/JPG) — optional", type=["png","jpg","jpeg"])
 
 # Helpers
 def hex_points(size):
@@ -89,11 +90,19 @@ def paste_logo_hex(qr_img, logo_img, logo_frac=0.25, padding=1.2):
     qr_img.paste(logo_hex, pos, mask=logo_hex)
     return qr_img
 
-def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=600):
-    """Return PNG bytes and PDF bytes of a sticker with large serial over the QR."""
+def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=600, background_img=None):
+    """Return PNG bytes and PDF bytes of a sticker with large serial over the QR, optionally on a background template."""
     # Pixel canvas from physical size & DPI
     px = int(sticker_cm / 2.54 * dpi)
-    canvas_img = Image.new("RGBA", (px, px), (255,255,255,255))
+
+    # Base canvas (background if provided, else white)
+    if background_img is not None:
+        # Ensure RGBA and fit to canvas
+        bg_rgba = background_img.convert("RGBA").resize((px, px), Image.LANCZOS)
+        canvas_img = Image.new("RGBA", (px, px), (255, 255, 255, 255))
+        canvas_img.alpha_composite(bg_rgba, (0, 0))
+    else:
+        canvas_img = Image.new("RGBA", (px, px), (255,255,255,255))
 
     # Layout parameters
     side_margin = int(0.1 * px)           # 10% margin
@@ -103,8 +112,8 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     qr_max_h = px - text_area - gap - side_margin
     qr_draw = min(qr_max, qr_max_h)
 
-    # Resize QR to fit
-    qr_resized = qr_img.resize((qr_draw, qr_draw), Image.NEAREST)  # keep crisp edges
+    # Resize QR to fit (keep crisp edges)
+    qr_resized = qr_img.resize((qr_draw, qr_draw), Image.NEAREST)
 
     # Serial font sizing by target width
     draw = ImageDraw.Draw(canvas_img)
@@ -139,12 +148,12 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     bbox = draw.textbbox((0, 0), serial, font=font_final)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-    # Paste QR
+    # Paste QR (centered below the serial band)
     qr_x = (px - qr_draw) // 2
     qr_y = px - side_margin - qr_draw
     canvas_img.paste(qr_resized, (qr_x, qr_y))
 
-    # Draw serial
+    # Draw serial (centered in the top band)
     text_x = (px - w) // 2
     text_y = (text_area - h) // 2
     draw.text((text_x, text_y), serial, fill="black", font=font_final)
@@ -158,14 +167,26 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     pdf_bytes = BytesIO()
     page = (sticker_cm * cm, sticker_cm * cm)
     c = canvas.Canvas(pdf_bytes, pagesize=page)
+
+    # Draw background on PDF if supplied
+    if background_img is not None:
+        bg_tmp = BytesIO()
+        background_img.convert("RGBA").resize((px, px), Image.LANCZOS).save(bg_tmp, format="PNG")
+        bg_tmp.seek(0)
+        c.drawImage(ImageReader(bg_tmp), 0, 0, width=page[0], height=page[1], mask='auto')
+
+    # Serial on PDF (scaled to target width and text band)
     from reportlab.pdfbase.pdfmetrics import stringWidth
     unit_w = stringWidth(serial, "Helvetica-Bold", 1)
-    font_sz = target_w / (dpi / 72.0) / unit_w if unit_w > 0 else 10
+    # Convert pixel target width to points (72 dpi)
+    target_w_pt = (target_w / dpi) * 72.0
+    font_sz = target_w_pt / unit_w if unit_w > 0 else 10
     text_area_pt = (text_area / dpi) * 72.0
     font_sz = min(font_sz, text_area_pt * 0.9)
     c.setFont("Helvetica-Bold", font_sz)
     c.drawCentredString(page[0]/2, page[1] - text_area_pt + (text_area_pt - font_sz)/2, serial)
 
+    # QR on PDF
     qr_png = BytesIO()
     qr_resized.save(qr_png, format="PNG")
     qr_png.seek(0)
@@ -173,6 +194,7 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     qr_x_pt = (page[0] - qr_draw_pt)/2
     qr_y_pt = side_margin / dpi * 72.0
     c.drawImage(ImageReader(qr_png), qr_x_pt, qr_y_pt, width=qr_draw_pt, height=qr_draw_pt, mask='auto')
+
     c.showPage()
     c.save()
     pdf_bytes.seek(0)
@@ -188,6 +210,7 @@ if st.button("Generate") and csv_file:
             st.error("CSV must contain columns: Serial, URL")
         else:
             logo_img = Image.open(logo_file).convert("RGBA") if logo_file else None
+            background_img = Image.open(bg_file).convert("RGBA") if bg_file else None
 
             png_zip_mem = BytesIO()
             pdf_zip_mem = BytesIO()
@@ -210,7 +233,8 @@ if st.button("Generate") and csv_file:
                     serial, qr,
                     sticker_cm=sticker_size_cm,
                     serial_width_ratio=serial_width_pct/100.0,
-                    dpi=dpi
+                    dpi=dpi,
+                    background_img=background_img
                 )
 
                 png_zip.writestr(f"{serial}_sticker.png", png_bytes.getvalue())
