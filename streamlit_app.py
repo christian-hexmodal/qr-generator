@@ -1,11 +1,12 @@
 import io
+import os
 import math
 import zipfile
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import qrcode
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
@@ -27,25 +28,27 @@ st.sidebar.header("Sticker Settings")
 sticker_size_cm = st.sidebar.number_input("Sticker size (cm)", min_value=2.0, max_value=20.0, value=8.0, step=0.5)
 logo_scale = st.sidebar.slider("Logo size (% of QR width)", min_value=10, max_value=40, value=25, step=1)
 cutout_padding = st.sidebar.slider("Logo cutout padding (×)", min_value=100, max_value=160, value=120, step=5) / 100.0
-serial_width_pct = st.sidebar.slider("Serial width (% of QR width)", min_value=20, max_value=80, value=50, step=5)
 dpi = st.sidebar.selectbox("PNG Export DPI", options=[300, 450, 600, 900], index=2)
 
 st.sidebar.header("QR Settings")
 ec_level = st.sidebar.selectbox("Error Correction", options=["L","M","Q","H"], index=3)
-box_size = st.sidebar.slider("QR Box Size (pixels per module)", min_value=10, max_value=40, value=20)
+box_size = 20  # fixed pixels per module for crisp QR (no UI control)
 
 st.sidebar.caption("Tip: Higher DPI & larger box size → crisper PNGs (bigger files).")
 
 # Preview & positioning controls
 st.sidebar.header("Preview & Positioning")
 enable_preview = st.sidebar.checkbox("Enable live preview", value=True)
-qr_x_offset_pct = st.sidebar.slider("QR X offset (% of canvas width)", -25, 25, 0, step=1)
-qr_y_offset_pct = st.sidebar.slider("QR Y offset (% of canvas height)", -25, 25, 0, step=1)
-serial_y_offset_pct = st.sidebar.slider("Serial Y offset (% of canvas height)", -15, 15, 0, step=1)
-
 drag_mode = st.sidebar.checkbox("Drag/resize on canvas (experimental)", value=False, help="Draw/drag rectangles to position the QR and a text box for the serial.")
-serial_font_name = st.sidebar.selectbox("Serial font", options=["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans"], index=0)
-serial_font_px = st.sidebar.slider("Serial font size (px, for PNG)", min_value=10, max_value=300, value=0, step=2, help="0 = auto-fit to target width")
+
+# Main-area controls defaults (persist via session_state)
+qr_size_pct = st.session_state.get("qr_size_pct", 80)
+qr_x_offset_pct = st.session_state.get("qr_x_offset_pct", 0)
+qr_y_offset_pct = st.session_state.get("qr_y_offset_pct", 0)
+serial_x_offset_pct = st.session_state.get("serial_x_offset_pct", 0)
+serial_y_offset_pct = st.session_state.get("serial_y_offset_pct", 0)
+serial_font_name = st.session_state.get("serial_font_name", "Helvetica-Bold")
+serial_font_px = st.session_state.get("serial_font_px", 0)
 
 st.subheader("1) Upload Inputs")
 csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
@@ -62,6 +65,38 @@ def hex_points(size):
     ]
     return pts
 
+def fit_image_to_square(image, side):
+    """Return an RGBA image of size (side, side) with the source image
+    letterboxed to maintain aspect ratio (centered, no stretch)."""
+    img = image.convert("RGBA")
+    w, h = img.size
+    if w == 0 or h == 0:
+        return Image.new("RGBA", (side, side), (255, 255, 255, 0))
+    scale = min(side / float(w), side / float(h))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = img.resize((new_w, new_h), Image.LANCZOS)
+    canvas = Image.new("RGBA", (side, side), (255, 255, 255, 0))
+    offset = ((side - new_w) // 2, (side - new_h) // 2)
+    canvas.paste(resized, offset, resized)
+    return canvas
+
+def add_border_to_png(png_bytes: bytes, border_px: int = 2, color=(0, 0, 0, 255)) -> BytesIO:
+    """Return new PNG bytes with a solid border added around the image."""
+    try:
+        img = Image.open(BytesIO(png_bytes)).convert("RGBA")
+        bordered = ImageOps.expand(img, border=border_px, fill=color)
+        out = BytesIO()
+        bordered.save(out, format="PNG")
+        out.seek(0)
+        return out
+    except Exception:
+        # If anything fails, return original bytes wrapped in BytesIO
+        bio = BytesIO()
+        bio.write(png_bytes)
+        bio.seek(0)
+        return bio
+
 def make_qr(data, error_correction, box_size=20, border=2):
     ec_map = {"L": qrcode.constants.ERROR_CORRECT_L,
               "M": qrcode.constants.ERROR_CORRECT_M,
@@ -75,7 +110,7 @@ def make_qr(data, error_correction, box_size=20, border=2):
     )
     qr.add_data(data)
     qr.make(fit=True)
-    return qr.make_image(fill_color="black", back_color="white").convert("RGBA")
+    return qr.make_image(fill_color="black", back_color="#E3E3E3").convert("RGBA")
 
 def paste_logo_hex(qr_img, logo_img, logo_frac=0.25, padding=1.2):
     """Clear a hexagonal area and paste the logo inside it."""
@@ -97,8 +132,8 @@ def paste_logo_hex(qr_img, logo_img, logo_frac=0.25, padding=1.2):
 
     # Clear QR center
     center = ((W - cutout_size)//2, (H - cutout_size)//2)
-    white_hex = Image.new("RGBA", (cutout_size, cutout_size), (255,255,255,255))
-    qr_img.paste(white_hex, center, mask=hex_mask_cutout)
+    gray_hex = Image.new("RGBA", (cutout_size, cutout_size), (227,227,227,255))  # #E3E3E3
+    qr_img.paste(gray_hex, center, mask=hex_mask_cutout)
 
     # Paste logo in center
     pos = ((W - logo_size)//2, (H - logo_size)//2)
@@ -110,7 +145,9 @@ def paste_logo_hex(qr_img, logo_img, logo_frac=0.25, padding=1.2):
 def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=600, background_img=None,
                     qr_x_offset_pct=0, qr_y_offset_pct=0, serial_y_offset_pct=0,
                     qr_abs_xy_px=None, qr_draw_override_px=None,
-                    serial_abs_xy_px=None, serial_font_name="Helvetica-Bold", serial_font_px=0):
+                    serial_abs_xy_px=None, serial_font_name="Helvetica-Bold", serial_font_px=0,
+                    serial_x_offset_pct=0, serial_abs_anchor: str = "lt",
+                    draw_template_border: bool = False):
     """Return PNG bytes and PDF bytes of a sticker with large serial over the QR, optionally on a background template."""
     # Pixel canvas from physical size & DPI
     px = int(sticker_cm / 2.54 * dpi)
@@ -122,12 +159,29 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
 
     # Base canvas (background if provided, else white)
     if background_img is not None:
-        # Ensure RGBA and fit to canvas
-        bg_rgba = background_img.convert("RGBA").resize((px, px), Image.LANCZOS)
+        # Fit to square canvas with letterboxing (no stretch)
+        bg_rgba = fit_image_to_square(background_img, px)
         canvas_img = Image.new("RGBA", (px, px), (255, 255, 255, 255))
         canvas_img.alpha_composite(bg_rgba, (0, 0))
     else:
         canvas_img = Image.new("RGBA", (px, px), (255,255,255,255))
+
+    # Optionally draw a border around the letterboxed template area (for preview only)
+    if draw_template_border and background_img is not None:
+        try:
+            orig_w, orig_h = background_img.size
+            scale = min(px / float(orig_w), px / float(orig_h))
+            new_w = max(1, int(round(orig_w * scale)))
+            new_h = max(1, int(round(orig_h * scale)))
+            offset_x = (px - new_w) // 2
+            offset_y = (px - new_h) // 2
+            border_draw = ImageDraw.Draw(canvas_img)
+            border_draw.rectangle(
+                [offset_x, offset_y, offset_x + new_w - 1, offset_y + new_h - 1],
+                outline=(0, 0, 0, 255), width=2
+            )
+        except Exception:
+            pass
 
     # Layout parameters
     side_margin = int(0.1 * px)           # 10% margin
@@ -153,8 +207,21 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
         font_candidates = ["Arial.ttf", "Arial Bold.ttf", "arialbd.ttf", "DejaVuSans.ttf", "DejaVuSans-Bold.ttf"]
     elif serial_font_name == "DejaVuSans-Bold":
         font_candidates = ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "arialbd.ttf", "Arial Bold.ttf"]
+    elif serial_font_name == "RedHatMono":
+        font_candidates = ["RedHatMono-Medium.ttf", "Monaco.ttf", "SFNSMono.ttf", "DejaVuSansMono.ttf", "RedHatMono-Regular.ttf", "RedHatMono-Bold.ttf", "RedHatMono.ttf", "DejaVuSans.ttf"]
     else:
         font_candidates = ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "Arial.ttf", "arialbd.ttf"]
+    # Always include PIL-bundled DejaVu fonts as reliable fallbacks
+    try:
+        pil_font_dir = os.path.join(os.path.dirname(ImageFont.__file__), "fonts")
+        pil_fallbacks = [
+            os.path.join(pil_font_dir, "DejaVuSans-Bold.ttf"),
+            os.path.join(pil_font_dir, "DejaVuSans.ttf"),
+        ]
+    except Exception:
+        pil_fallbacks = []
+    font_candidates.extend(pil_fallbacks)
+
     font = None
     for fname in font_candidates:
         try:
@@ -166,18 +233,19 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     if font is None:
         font = ImageFont.load_default()
 
-    target_w = int(serial_width_ratio * qr_draw)
+    # If explicit px size not set, auto-fit to a default target width (50% of QR)
+    target_w = int(0.5 * qr_draw)
     if serial_font_px and serial_font_px > 0:
         font_final = font  # already sized
     else:
         size = 10
-        chosen_font_name = getattr(font, "loaded_name", "DejaVuSans-Bold.ttf")
+        chosen_font_name = getattr(font, "loaded_name", os.path.join(os.path.dirname(ImageFont.__file__), "fonts", "DejaVuSans-Bold.ttf"))
         while size < 1000:
             try:
                 f = ImageFont.truetype(chosen_font_name, size=size)
             except:
                 try:
-                    f = ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
+                    f = ImageFont.truetype(os.path.join(os.path.dirname(ImageFont.__file__), "fonts", "DejaVuSans-Bold.ttf"), size=size)
                 except:
                     f = ImageFont.load_default()
                     break
@@ -202,14 +270,36 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     # Draw serial (centered in the top band)
     if serial_abs_xy_px is not None:
         text_x, text_y = int(serial_abs_xy_px[0]), int(serial_abs_xy_px[1])
+        if serial_abs_anchor == "mm":
+            draw.text((text_x, text_y), serial, fill="black", font=font_final, anchor="mm")
+        else:
+            draw.text((text_x, text_y), serial, fill="black", font=font_final)
     else:
-        text_x = (px - w) // 2
-        text_y = (text_area - h) // 2 + serial_y_offset_px
-    draw.text((text_x, text_y), serial, fill="black", font=font_final)
+        center_x = (px // 2) + int((serial_x_offset_pct / 100.0) * px)
+        center_y = (text_area // 2) + serial_y_offset_px
+        draw.text((center_x, center_y), serial, fill="black", font=font_final, anchor="mm")
 
-    # Export PNG
+    # Export JPEG - crop to template area and resize to 778x1604
+    if background_img is not None:
+        # Crop to the letterboxed template area
+        try:
+            orig_w, orig_h = background_img.size
+            scale = min(px / float(orig_w), px / float(orig_h))
+            new_w = max(1, int(round(orig_w * scale)))
+            new_h = max(1, int(round(orig_h * scale)))
+            offset_x = (px - new_w) // 2
+            offset_y = (px - new_h) // 2
+            cropped_img = canvas_img.crop((offset_x, offset_y, offset_x + new_w, offset_y + new_h))
+        except Exception:
+            cropped_img = canvas_img
+    else:
+        cropped_img = canvas_img
+    
+    # Resize to exact target dimensions and convert to RGB for JPEG
+    final_img = cropped_img.resize((778, 1604), Image.LANCZOS).convert("RGB")
+    
     png_bytes = BytesIO()
-    canvas_img.save(png_bytes, format="PNG", dpi=(dpi, dpi))
+    final_img.save(png_bytes, format="JPEG", quality=95)
     png_bytes.seek(0)
 
     # Export PDF
@@ -226,13 +316,22 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
     # Draw background on PDF if supplied
     if background_img is not None:
         bg_tmp = BytesIO()
-        background_img.convert("RGBA").resize((px, px), Image.LANCZOS).save(bg_tmp, format="PNG")
+        fit_image_to_square(background_img, px).save(bg_tmp, format="PNG")
         bg_tmp.seek(0)
         c.drawImage(ImageReader(bg_tmp), 0, 0, width=page[0], height=page[1], mask='auto')
 
     # Serial on PDF (scaled to target width and text band)
     from reportlab.pdfbase.pdfmetrics import stringWidth
-    unit_w = stringWidth(serial, serial_font_name if serial_font_name else "Helvetica-Bold", 1)
+    # Map UI font names to ReportLab core fonts to avoid KeyError
+    font_pdf_map = {
+        "Helvetica-Bold": "Helvetica-Bold",
+        "Arial": "Helvetica",
+        "DejaVuSans-Bold": "Helvetica-Bold",
+        "DejaVuSans": "Helvetica",
+        "RedHatMono": "Courier",
+    }
+    pdf_font_name = font_pdf_map.get(serial_font_name or "Helvetica-Bold", "Helvetica-Bold")
+    unit_w = stringWidth(serial, pdf_font_name, 1)
     target_w_pt = (target_w / dpi) * 72.0
     if serial_font_px and serial_font_px > 0:
         # Convert PNG px to points (approximate 1 px at given DPI to points)
@@ -241,15 +340,16 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
         font_sz = target_w_pt / unit_w if unit_w > 0 else 10
         text_area_pt = (text_area / dpi) * 72.0
         font_sz = min(font_sz, text_area_pt * 0.9)
-    c.setFont(serial_font_name if serial_font_name else "Helvetica-Bold", font_sz)
+    c.setFont(pdf_font_name, font_sz)
 
     if serial_abs_xy_px is not None:
-        sx_pt = serial_abs_xy_px[0] * px_to_pt
-        sy_pt = (px - serial_abs_xy_px[1]) * px_to_pt  # convert from top-left origin (PNG) to PDF bottom-left origin
-        c.drawString(sx_pt, sy_pt, serial)
+        # Centered anchor for PDF when using absolute placement
+        sx_pt_center = (serial_abs_xy_px[0] + w / 2) * px_to_pt
+        sy_pt_center = (px - (serial_abs_xy_px[1] + h / 2)) * px_to_pt
+        c.drawCentredString(sx_pt_center, sy_pt_center, serial)
     else:
         text_area_pt = (text_area / dpi) * 72.0
-        c.drawCentredString(page[0]/2, page[1] - text_area_pt + (text_area_pt - font_sz)/2 + serial_y_offset_pt, serial)
+        c.drawCentredString(page[0]/2 + (serial_x_offset_pct/100.0)*page[0]/2, page[1] - text_area_pt/2 + serial_y_offset_pt, serial)
 
     # QR on PDF
     qr_png = BytesIO()
@@ -279,22 +379,39 @@ if enable_preview and drag_mode and HAS_CANVAS:
     bg_for_canvas = Image.new("RGBA", (px_preview, px_preview), (255,255,255,255))
     if bg_file:
         try:
-            _bg_canvas = Image.open(bg_file).convert("RGBA").resize((px_preview, px_preview), Image.LANCZOS)
+            _bg_canvas = fit_image_to_square(Image.open(bg_file).convert("RGBA"), px_preview)
             bg_for_canvas.alpha_composite(_bg_canvas)
         except Exception:
             pass
     # instructions
     st.markdown("Draw **one rectangle for the QR** and **one rectangle for the Serial text area**. You can drag/resize them. The largest rectangle will be treated as the QR.")
-    canvas_result = st_canvas(
-        fill_color="rgba(0,0,0,0)",
-        stroke_width=2,
-        background_image=bg_for_canvas,
-        update_streamlit=True,
-        height=px_preview,
-        width=px_preview,
-        drawing_mode="rect",
-        key="layout_canvas",
-    )
+    try:
+        canvas_result = st_canvas(
+            fill_color="rgba(0,0,0,0)",
+            stroke_width=2,
+            background_image=bg_for_canvas,
+            update_streamlit=True,
+            height=px_preview,
+            width=px_preview,
+            drawing_mode="rect",
+            key="layout_canvas",
+        )
+    except AttributeError as e:
+        if "image_to_url" in str(e):
+            # Fallback for newer Streamlit where image_to_url is unavailable
+            canvas_result = st_canvas(
+                fill_color="rgba(0,0,0,0)",
+                stroke_width=2,
+                background_color="#FFFFFF",
+                update_streamlit=True,
+                height=px_preview,
+                width=px_preview,
+                drawing_mode="rect",
+                key="layout_canvas",
+            )
+            st.info("Canvas background disabled due to Streamlit compatibility.")
+        else:
+            raise
     qr_abs_xy_px = None
     qr_draw_override_px = None
     serial_abs_xy_px = None
@@ -315,6 +432,7 @@ if enable_preview and drag_mode and HAS_CANVAS:
     preview_url = "https://hexmodal.com"
     if csv_file:
         try:
+            csv_file.seek(0)
             _df_preview = pd.read_csv(csv_file)
             _df_preview.columns = [c.strip().title() for c in _df_preview.columns]
             for _, _row in _df_preview.iterrows():
@@ -341,25 +459,52 @@ if enable_preview and drag_mode and HAS_CANVAS:
     _png_bytes, _ = compose_sticker(
         preview_serial, _qr,
         sticker_cm=sticker_size_cm,
-        serial_width_ratio=serial_width_pct/100.0,
+        serial_width_ratio=0.5,
         dpi=dpi,
         background_img=_bg_img,
         qr_abs_xy_px=qr_abs_xy_px,
         qr_draw_override_px=qr_draw_override_px,
-        serial_abs_xy_px=serial_abs_xy_px,
+        serial_abs_xy_px=(
+            (qr_abs_xy_px[0] + qr_draw_override_px//2) if (serial_abs_xy_px is not None and qr_abs_xy_px is not None) else serial_abs_xy_px[0] if serial_abs_xy_px is not None else None,
+            (qr_abs_xy_px[1] - 10) if (serial_abs_xy_px is not None and qr_abs_xy_px is not None) else serial_abs_xy_px[1] if serial_abs_xy_px is not None else None
+        ) if serial_abs_xy_px is not None else None,
         serial_font_name=serial_font_name,
-        serial_font_px=serial_font_px
+        serial_font_px=serial_font_px,
+        serial_x_offset_pct=serial_x_offset_pct,
+        serial_abs_anchor="mm" if serial_abs_xy_px is not None else "lt"
     )
-    st.image(_png_bytes.getvalue(), caption="Live preview (drag mode)", use_container_width=True)
+    _bordered = add_border_to_png(_png_bytes.getvalue(), border_px=2)
+    st.image(_bordered.getvalue(), caption="Live preview (drag mode)", width=420)
     st.stop()
 
 if enable_preview:
     st.subheader("Preview")
+    # Inline controls for QR and Serial
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        qr_size_pct = st.slider("QR size (% of canvas)", 20, 100, int(qr_size_pct), 1)
+        serial_font_px = st.slider("Serial font size (px)", 0, 300, int(serial_font_px), 2, help="0 = auto-fit")
+    with col_b:
+        qr_x_offset_pct = st.slider("QR X offset (%)", -50, 50, int(qr_x_offset_pct), 1)
+        serial_x_offset_pct = st.slider("Serial X offset (%)", -50, 50, int(serial_x_offset_pct), 1)
+    with col_c:
+        qr_y_offset_pct = st.slider("QR Y offset (%)", -50, 50, int(qr_y_offset_pct), 1)
+        serial_y_offset_pct = st.slider("Serial Y offset (%)", -50, 50, int(serial_y_offset_pct), 1)
+    serial_font_name = st.selectbox("Serial font", options=["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"], index=["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"].index(serial_font_name) if serial_font_name in ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"] else 0)
+    # persist
+    st.session_state["qr_size_pct"] = qr_size_pct
+    st.session_state["qr_x_offset_pct"] = qr_x_offset_pct
+    st.session_state["qr_y_offset_pct"] = qr_y_offset_pct
+    st.session_state["serial_x_offset_pct"] = serial_x_offset_pct
+    st.session_state["serial_y_offset_pct"] = serial_y_offset_pct
+    st.session_state["serial_font_name"] = serial_font_name
+    st.session_state["serial_font_px"] = serial_font_px
     # Try to use the first valid row in the CSV; otherwise allow manual inputs
     preview_serial = None
     preview_url = None
     if csv_file:
         try:
+            csv_file.seek(0)
             _df_preview = pd.read_csv(csv_file)
             _df_preview.columns = [c.strip().title() for c in _df_preview.columns]
             for _, _row in _df_preview.iterrows():
@@ -391,24 +536,31 @@ if enable_preview:
                 _bg_img = Image.open(bg_file).convert("RGBA")
             except Exception:
                 _bg_img = None
+        _px_for_preview = int(sticker_size_cm / 2.54 * dpi)
+        _qr_draw_override_px_slider = int(qr_size_pct / 100.0 * _px_for_preview)
         _png_bytes, _ = compose_sticker(
             preview_serial, _qr,
             sticker_cm=sticker_size_cm,
-            serial_width_ratio=serial_width_pct/100.0,
+            serial_width_ratio=0.5,
             dpi=dpi,
             background_img=_bg_img,
             qr_x_offset_pct=qr_x_offset_pct,
             qr_y_offset_pct=qr_y_offset_pct,
             serial_y_offset_pct=serial_y_offset_pct,
+            qr_draw_override_px=_qr_draw_override_px_slider,
             serial_font_name=serial_font_name,
-            serial_font_px=serial_font_px
+            serial_font_px=serial_font_px,
+            serial_x_offset_pct=serial_x_offset_pct,
+            serial_abs_anchor="lt"
         )
-        st.image(_png_bytes.getvalue(), caption="Live preview (PNG)", use_container_width=True)
+        _bordered = add_border_to_png(_png_bytes.getvalue(), border_px=2)
+        st.image(_bordered.getvalue(), caption="Live preview (PNG)", width=420)
 # ---------- End Preview ----------
 
 st.subheader("2) Generate Stickers")
 if st.button("Generate") and csv_file:
     try:
+        csv_file.seek(0)
         df = pd.read_csv(csv_file)
         df.columns = [c.strip().title() for c in df.columns]
         if "Serial" not in df.columns or "Url" not in df.columns:
@@ -417,12 +569,13 @@ if st.button("Generate") and csv_file:
             logo_img = Image.open(logo_file).convert("RGBA") if logo_file else None
             background_img = Image.open(bg_file).convert("RGBA") if bg_file else None
 
-            png_zip_mem = BytesIO()
-            pdf_zip_mem = BytesIO()
-            png_zip = zipfile.ZipFile(png_zip_mem, mode="w", compression=zipfile.ZIP_DEFLATED)
-            pdf_zip = zipfile.ZipFile(pdf_zip_mem, mode="w", compression=zipfile.ZIP_DEFLATED)
+            jpg_zip_mem = BytesIO()
+            jpg_zip = zipfile.ZipFile(jpg_zip_mem, mode="w", compression=zipfile.ZIP_DEFLATED)
 
             preview_cols = st.columns(3)
+
+            _px_for_gen = int(sticker_size_cm / 2.54 * dpi)
+            _qr_draw_override_px_slider = int(qr_size_pct / 100.0 * _px_for_gen)
 
             for i, row in df.iterrows():
                 serial = str(row["Serial"]).strip()
@@ -434,32 +587,32 @@ if st.button("Generate") and csv_file:
                 if logo_img:
                     qr = paste_logo_hex(qr, logo_img, logo_frac=logo_scale/100.0, padding=cutout_padding)
 
-                png_bytes, pdf_bytes = compose_sticker(
+                jpg_bytes, _ = compose_sticker(
                     serial, qr,
                     sticker_cm=sticker_size_cm,
-                    serial_width_ratio=serial_width_pct/100.0,
+                    serial_width_ratio=0.5,
                     dpi=dpi,
                     background_img=background_img,
                     qr_x_offset_pct=qr_x_offset_pct,
                     qr_y_offset_pct=qr_y_offset_pct,
                     serial_y_offset_pct=serial_y_offset_pct,
+                    qr_draw_override_px=_qr_draw_override_px_slider,
                     serial_font_name=serial_font_name,
-                    serial_font_px=serial_font_px
+                    serial_font_px=serial_font_px,
+                    serial_x_offset_pct=serial_x_offset_pct,
+                    serial_abs_anchor="lt"
                 )
 
-                png_zip.writestr(f"{serial}_sticker.png", png_bytes.getvalue())
-                pdf_zip.writestr(f"{serial}_sticker.pdf", pdf_bytes.getvalue())
+                jpg_zip.writestr(f"{serial}_sticker.jpg", jpg_bytes.getvalue())
 
                 if i < 3:
                     with preview_cols[i % 3]:
-                        st.image(png_bytes.getvalue(), caption=serial, use_container_width=True)
+                        st.image(jpg_bytes.getvalue(), caption=serial, width=240)
 
-            png_zip.close()
-            pdf_zip.close()
+            jpg_zip.close()
 
             st.success("Done! Download your files below.")
-            st.download_button("📦 Download PNGs ZIP", data=png_zip_mem.getvalue(), file_name="hexmodal_stickers_png.zip", mime="application/zip")
-            st.download_button("📦 Download PDFs ZIP", data=pdf_zip_mem.getvalue(), file_name="hexmodal_stickers_pdf.zip", mime="application/zip")
+            st.download_button("📦 Download JPEGs ZIP", data=jpg_zip_mem.getvalue(), file_name="hexmodal_stickers_jpg.zip", mime="application/zip")
 
     except Exception as e:
         st.exception(e)

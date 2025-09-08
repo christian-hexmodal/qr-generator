@@ -4,3 +4,4 @@ pillow
 qrcode[pil]
 reportlab
 pandas
+streamlit-drawable-canvas
