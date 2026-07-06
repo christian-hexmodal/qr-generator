@@ -23,23 +23,44 @@ st.set_page_config(page_title="Hexmodal QR Sticker Generator", page_icon="🔳",
 st.title("🔳 Hexmodal QR Sticker Generator")
 st.caption("Upload a CSV of Serial/URL and an optional black Hexmodal logo — get per-serial PDF + high-res PNG stickers with a hexagonal logo cutout.")
 
-# Sidebar parameters
-st.sidebar.header("Sticker Settings")
-sticker_size_cm = st.sidebar.number_input("Sticker size (cm)", min_value=2.0, max_value=20.0, value=8.0, step=0.5)
-logo_scale = st.sidebar.slider("Logo size (% of QR width)", min_value=10, max_value=40, value=25, step=1)
-cutout_padding = st.sidebar.slider("Logo cutout padding (×)", min_value=100, max_value=160, value=120, step=5) / 100.0
-dpi = st.sidebar.selectbox("PNG Export DPI", options=[300, 450, 600, 900], index=2)
+# ---------- Template + font config ----------
+FONT_OPTIONS = ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"]
+TEMPLATES = {
+    "HEX-F — portrait sticker": {"kind": "hexf"},
+    "HEX-T-S — 60 × 20 mm landscape": {"kind": "hts", "w_mm": 60, "h_mm": 20},
+    "HEX-L-Z — 20 × 20 mm square": {"kind": "hlz", "w_mm": 20, "h_mm": 20},
+}
 
-st.sidebar.header("QR Settings")
-ec_level = st.sidebar.selectbox("Error Correction", options=["L","M","Q","H"], index=3)
+# ---------- Sidebar (template-aware) ----------
+st.sidebar.header("Template")
+template_label = st.sidebar.selectbox("Template", list(TEMPLATES.keys()))
+tpl = TEMPLATES[template_label]
+
+st.sidebar.header("Output")
+dpi = st.sidebar.selectbox("PNG Export DPI", options=[300, 450, 600, 900], index=2)
+ec_level = st.sidebar.selectbox("QR Error Correction", options=["L","M","Q","H"], index=3)
 box_size = 20  # fixed pixels per module for crisp QR (no UI control)
 
-st.sidebar.caption("Tip: Higher DPI & larger box size → crisper PNGs (bigger files).")
+if tpl["kind"] == "hexf":
+    st.sidebar.header("Sticker Settings")
+    sticker_size_cm = st.sidebar.number_input("Sticker size (cm)", min_value=2.0, max_value=20.0, value=8.0, step=0.5)
+else:
+    sticker_size_cm = 8.0  # not used by fixed-size label templates
+    st.sidebar.caption(f"📐 Label size fixed at {tpl['w_mm']} × {tpl['h_mm']} mm")
 
-# Preview & positioning controls
-st.sidebar.header("Preview & Positioning")
-enable_preview = st.sidebar.checkbox("Enable live preview", value=True)
-drag_mode = st.sidebar.checkbox("Drag/resize on canvas (experimental)", value=False, help="Draw/drag rectangles to position the QR and a text box for the serial.")
+st.sidebar.header("Logo cutout (optional)")
+st.sidebar.caption("Applies only when a logo PNG is uploaded.")
+logo_scale = st.sidebar.slider("Logo size (% of QR width)", min_value=10, max_value=40, value=25, step=1)
+cutout_padding = st.sidebar.slider("Logo cutout padding (×)", min_value=100, max_value=160, value=120, step=5) / 100.0
+
+# Preview & positioning is HEX-F only (offset/drag controls don't apply to fixed labels)
+if tpl["kind"] == "hexf":
+    st.sidebar.header("Preview & Positioning")
+    enable_preview = st.sidebar.checkbox("Enable live preview", value=True)
+    drag_mode = st.sidebar.checkbox("Drag/resize on canvas (experimental)", value=False, help="Draw/drag rectangles to position the QR and a text box for the serial.")
+else:
+    enable_preview = True
+    drag_mode = False
 
 # Main-area controls defaults (persist via session_state)
 qr_size_pct = st.session_state.get("qr_size_pct", 80)
@@ -50,19 +71,7 @@ serial_y_offset_pct = st.session_state.get("serial_y_offset_pct", 0)
 serial_font_name = "RedHatMono"  # serials always use Red Hat Mono
 serial_font_px = st.session_state.get("serial_font_px", 0)
 
-# ---------- Template selection ----------
-FONT_OPTIONS = ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"]
-TEMPLATES = {
-    "HEX-F — portrait sticker": {"kind": "hexf"},
-    "HEX-T-S — 60 × 20 mm landscape": {"kind": "hts", "w_mm": 60, "h_mm": 20},
-    "HEX-L-Z — 20 × 20 mm square": {"kind": "hlz", "w_mm": 20, "h_mm": 20},
-}
-
-st.subheader("1) Choose Template")
-template_label = st.selectbox("Template", list(TEMPLATES.keys()))
-tpl = TEMPLATES[template_label]
-
-st.subheader("2) Upload Inputs")
+st.subheader("1) Upload Inputs")
 csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
 logo_file = st.file_uploader("Black Hexmodal logo (PNG) — optional", type=["png"])
 
@@ -73,7 +82,7 @@ if tpl["kind"] == "hexf":
     bg_file = st.file_uploader("Background template (PNG/JPG) — optional", type=["png","jpg","jpeg"])
 elif tpl["kind"] == "hts":
     subtitle_text = st.text_input("Subtitle (fixed for this batch)", value="Smart Temperature Monitor")
-    cert_file = st.file_uploader("Certification icons strip (PNG, transparent) — optional", type=["png"])
+    cert_file = st.file_uploader("Certification icons strip (PNG, transparent) — optional; defaults to bundled cert_icons.png", type=["png"])
 
 # Helpers
 def hex_points(size):
@@ -557,11 +566,16 @@ if tpl["kind"] != "hexf":
         return None, None
 
     _cert_img = None
-    if tpl["kind"] == "hts" and cert_file:
-        try:
-            _cert_img = Image.open(cert_file).convert("RGBA")
-        except Exception:
-            _cert_img = None
+    if tpl["kind"] == "hts":
+        # Prefer an uploaded strip; otherwise fall back to a bundled default in the repo.
+        _cert_src = cert_file
+        if _cert_src is None and os.path.exists("cert_icons.png"):
+            _cert_src = "cert_icons.png"
+        if _cert_src is not None:
+            try:
+                _cert_img = Image.open(_cert_src).convert("RGBA")
+            except Exception:
+                _cert_img = None
 
     def _build_qr_for(url):
         q = make_qr(url, ec_level, box_size=box_size, border=2)
