@@ -47,13 +47,33 @@ qr_x_offset_pct = st.session_state.get("qr_x_offset_pct", 0)
 qr_y_offset_pct = st.session_state.get("qr_y_offset_pct", 0)
 serial_x_offset_pct = st.session_state.get("serial_x_offset_pct", 0)
 serial_y_offset_pct = st.session_state.get("serial_y_offset_pct", 0)
-serial_font_name = st.session_state.get("serial_font_name", "Helvetica-Bold")
+serial_font_name = "RedHatMono"  # serials always use Red Hat Mono
 serial_font_px = st.session_state.get("serial_font_px", 0)
 
-st.subheader("1) Upload Inputs")
+# ---------- Template selection ----------
+FONT_OPTIONS = ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"]
+TEMPLATES = {
+    "HEX-F — portrait sticker": {"kind": "hexf"},
+    "HEX-T-S — 60 × 20 mm landscape": {"kind": "hts", "w_mm": 60, "h_mm": 20},
+    "HEX-L-Z — 20 × 20 mm square": {"kind": "hlz", "w_mm": 20, "h_mm": 20},
+}
+
+st.subheader("1) Choose Template")
+template_label = st.selectbox("Template", list(TEMPLATES.keys()))
+tpl = TEMPLATES[template_label]
+
+st.subheader("2) Upload Inputs")
 csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
 logo_file = st.file_uploader("Black Hexmodal logo (PNG) — optional", type=["png"])
-bg_file = st.file_uploader("Background template (PNG/JPG) — optional", type=["png","jpg","jpeg"])
+
+bg_file = None
+subtitle_text = ""
+cert_file = None
+if tpl["kind"] == "hexf":
+    bg_file = st.file_uploader("Background template (PNG/JPG) — optional", type=["png","jpg","jpeg"])
+elif tpl["kind"] == "hts":
+    subtitle_text = st.text_input("Subtitle (fixed for this batch)", value="Smart Temperature Monitor")
+    cert_file = st.file_uploader("Certification icons strip (PNG, transparent) — optional", type=["png"])
 
 # Helpers
 def hex_points(size):
@@ -371,6 +391,248 @@ def compose_sticker(serial, qr_img, sticker_cm=8.0, serial_width_ratio=0.5, dpi=
 
     return png_bytes, pdf_bytes
 
+# ---------- Font + new-template helpers ----------
+def _font_candidates(name):
+    if name == "Helvetica-Bold":
+        c = ["Helvetica-Bold", "Arial Bold.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"]
+    elif name == "Arial":
+        c = ["Arial.ttf", "Arial Bold.ttf", "arialbd.ttf", "DejaVuSans.ttf", "DejaVuSans-Bold.ttf"]
+    elif name == "DejaVuSans-Bold":
+        c = ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "arialbd.ttf", "Arial Bold.ttf"]
+    elif name == "RedHatMono":
+        c = ["RedHatMono-Medium.ttf", "Monaco.ttf", "SFNSMono.ttf", "DejaVuSansMono.ttf", "DejaVuSans.ttf"]
+    else:
+        c = ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "Arial.ttf", "arialbd.ttf"]
+    try:
+        d = os.path.join(os.path.dirname(ImageFont.__file__), "fonts")
+        c += [os.path.join(d, "DejaVuSans-Bold.ttf"), os.path.join(d, "DejaVuSans.ttf")]
+    except Exception:
+        pass
+    return c
+
+def load_font(name, size):
+    size = max(1, int(size))
+    for f in _font_candidates(name):
+        try:
+            return ImageFont.truetype(f, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+def fit_font(draw, text, name, max_w, max_h, step=2, cap=4000):
+    """Largest font (by binary-ish growth) whose bbox fits within max_w × max_h."""
+    if not text:
+        return load_font(name, 10)
+    size = 6
+    chosen = load_font(name, size)
+    while size < cap:
+        f = load_font(name, size + step)
+        bbox = draw.textbbox((0, 0), text, font=f)
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if w > max_w or h > max_h:
+            break
+        size += step
+        chosen = f
+    return chosen
+
+def fit_font_height(draw, text, name, target_h, max_w, step=2, cap=4000):
+    """Largest font whose line height (ascent+descent) fits target_h and width fits max_w.
+    Uses font metrics for a predictable line box so stacked lines don't collide."""
+    if not text:
+        return load_font(name, 10)
+    size = 6
+    chosen = load_font(name, size)
+    while size < cap:
+        f = load_font(name, size + step)
+        asc, desc = f.getmetrics()
+        bbox = draw.textbbox((0, 0), text, font=f)
+        w = bbox[2] - bbox[0]
+        if (asc + desc) > target_h or w > max_w:
+            break
+        size += step
+        chosen = f
+    return chosen
+
+def mm_to_px(mm, dpi):
+    return max(1, int(round(mm / 25.4 * dpi)))
+
+def compose_hex_l_z(serial, qr_img, dpi=600, font_name="RedHatMono"):
+    """20 × 20 mm square label: serial on top, large QR filling the rest. Returns PNG bytes."""
+    side = mm_to_px(20, dpi)
+    canvas_img = Image.new("RGB", (side, side), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas_img)
+
+    margin = int(round(0.06 * side))
+    text_band = int(round(0.20 * side))
+
+    sfont = fit_font(draw, serial, font_name, side - 2 * margin, int(text_band * 0.78))
+
+    avail_h = side - text_band - margin
+    avail_w = side - 2 * margin
+    qr_side = max(1, min(avail_w, avail_h))
+    qr_resized = qr_img.convert("RGB").resize((qr_side, qr_side), Image.NEAREST)
+    qr_x = (side - qr_side) // 2
+    qr_y = text_band + (avail_h - qr_side) // 2
+    canvas_img.paste(qr_resized, (qr_x, qr_y))
+
+    draw.text((side // 2, text_band // 2), serial, fill="black", font=sfont, anchor="mm")
+
+    out = BytesIO()
+    canvas_img.save(out, format="PNG")
+    out.seek(0)
+    return out
+
+def compose_hex_t_s(serial, qr_img, subtitle="", cert_img=None, dpi=600,
+                    font_name="RedHatMono", subtitle_font_name="DejaVuSans"):
+    """60 × 20 mm landscape label: rounded border, QR left, serial + subtitle + cert icons right.
+    Returns PNG bytes."""
+    w = mm_to_px(60, dpi)
+    h = mm_to_px(20, dpi)
+    canvas_img = Image.new("RGB", (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas_img)
+
+    # Rounded border
+    bw = max(2, int(round(0.012 * h)))
+    radius = int(round(0.14 * h))
+    draw.rounded_rectangle([bw, bw, w - 1 - bw, h - 1 - bw], radius=radius, outline=(0, 0, 0), width=bw)
+
+    pad = int(round(0.10 * h))
+    inner_h = h - 2 * pad
+
+    # QR on the left (square, full inner height)
+    qr_side = max(1, inner_h)
+    qr_resized = qr_img.convert("RGB").resize((qr_side, qr_side), Image.NEAREST)
+    qr_x = pad + int(round(0.02 * w))
+    qr_y = (h - qr_side) // 2
+    canvas_img.paste(qr_resized, (qr_x, qr_y))
+
+    # Text block to the right of the QR
+    text_x = qr_x + qr_side + int(round(0.03 * w))
+    text_w = max(1, (w - pad) - text_x)
+    top = qr_y
+
+    # Reserve stacked line boxes: serial (top), subtitle (mid), cert icons (bottom)
+    serial_h = int(round(inner_h * 0.50))
+    sub_h = int(round(inner_h * 0.22))
+    cert_h = int(round(inner_h * 0.24))
+
+    sfont = fit_font_height(draw, serial, font_name, serial_h, text_w)
+    draw.text((text_x, top), serial, fill="black", font=sfont, anchor="la")
+
+    if subtitle:
+        sub_y = top + serial_h
+        subfont = fit_font_height(draw, subtitle, subtitle_font_name, sub_h, text_w)
+        draw.text((text_x, sub_y), subtitle, fill=(90, 90, 90), font=subfont, anchor="la")
+
+    if cert_img is not None:
+        cert_top = qr_y + inner_h - cert_h
+        ci = cert_img.convert("RGBA")
+        cw, ch = ci.size
+        if cw > 0 and ch > 0:
+            scale = min(cert_h / float(ch), text_w / float(cw))
+            nw = max(1, int(round(cw * scale)))
+            nh = max(1, int(round(ch * scale)))
+            ci_r = ci.resize((nw, nh), Image.LANCZOS)
+            canvas_img.paste(ci_r, (text_x, cert_top), ci_r)
+
+    out = BytesIO()
+    canvas_img.save(out, format="PNG")
+    out.seek(0)
+    return out
+
+# ---------- New templates (HEX-T-S / HEX-L-Z) ----------
+if tpl["kind"] != "hexf":
+    def _first_csv_row(f):
+        try:
+            f.seek(0)
+            d = pd.read_csv(f)
+            d.columns = [c.strip().title() for c in d.columns]
+            for _, r in d.iterrows():
+                s = str(r.get("Serial", "")).strip()
+                u = str(r.get("Url", "")).strip()
+                if s and u:
+                    return s, u
+        except Exception:
+            pass
+        return None, None
+
+    _cert_img = None
+    if tpl["kind"] == "hts" and cert_file:
+        try:
+            _cert_img = Image.open(cert_file).convert("RGBA")
+        except Exception:
+            _cert_img = None
+
+    def _build_qr_for(url):
+        q = make_qr(url, ec_level, box_size=box_size, border=2)
+        if logo_file:
+            try:
+                lg = Image.open(logo_file).convert("RGBA")
+                q = paste_logo_hex(q, lg, logo_frac=logo_scale / 100.0, padding=cutout_padding)
+            except Exception:
+                pass
+        return q
+
+    def _compose_one(serial, url, font_name):
+        q = _build_qr_for(url)
+        if tpl["kind"] == "hts":
+            return compose_hex_t_s(serial, q, subtitle=subtitle_text, cert_img=_cert_img,
+                                   dpi=dpi, font_name=font_name)
+        return compose_hex_l_z(serial, q, dpi=dpi, font_name=font_name)
+
+    st.subheader("3) Preview")
+    nt_font = "RedHatMono"  # serials always use Red Hat Mono
+
+    pv_serial, pv_url = (None, None)
+    if csv_file:
+        pv_serial, pv_url = _first_csv_row(csv_file)
+    if not pv_serial:
+        c1, c2 = st.columns(2)
+        with c1:
+            pv_serial = st.text_input("Preview serial", value="T001" if tpl["kind"] == "hts" else "L001")
+        with c2:
+            pv_url = st.text_input("Preview URL", value="https://hexmodal.com")
+
+    if pv_serial and pv_url:
+        _pv = _compose_one(pv_serial, pv_url, nt_font)
+        _pvb = add_border_to_png(_pv.getvalue(), border_px=1, color=(200, 200, 200, 255))
+        st.image(_pvb.getvalue(), caption=f"{template_label} preview",
+                 width=520 if tpl["kind"] == "hts" else 260)
+
+    st.subheader("4) Generate Stickers")
+    if st.button("Generate") and csv_file:
+        try:
+            csv_file.seek(0)
+            df = pd.read_csv(csv_file)
+            df.columns = [c.strip().title() for c in df.columns]
+            if "Serial" not in df.columns or "Url" not in df.columns:
+                st.error("CSV must contain columns: Serial, URL")
+            else:
+                zip_mem = BytesIO()
+                zf = zipfile.ZipFile(zip_mem, mode="w", compression=zipfile.ZIP_DEFLATED)
+                pcols = st.columns(3)
+                n = 0
+                for _, row in df.iterrows():
+                    serial = str(row["Serial"]).strip()
+                    url = str(row["Url"]).strip()
+                    if not serial or not url:
+                        continue
+                    png = _compose_one(serial, url, nt_font)
+                    zf.writestr(f"{serial}_sticker.png", png.getvalue())
+                    if n < 3:
+                        with pcols[n % 3]:
+                            st.image(png.getvalue(), caption=serial, width=240)
+                    n += 1
+                zf.close()
+                st.success(f"Done! {n} sticker(s) generated.")
+                st.download_button("📦 Download PNGs ZIP", data=zip_mem.getvalue(),
+                                   file_name=f"{tpl['kind']}_stickers_png.zip", mime="application/zip")
+        except Exception as e:
+            st.exception(e)
+    else:
+        st.info("Upload your CSV, then click **Generate**.")
+    st.stop()
+
 # ---------- Live Preview ----------
 if enable_preview and drag_mode and HAS_CANVAS:
     st.subheader("Preview (drag/resize)")
@@ -490,7 +752,7 @@ if enable_preview:
     with col_c:
         qr_y_offset_pct = st.slider("QR Y offset (%)", -50, 50, int(qr_y_offset_pct), 1)
         serial_y_offset_pct = st.slider("Serial Y offset (%)", -50, 50, int(serial_y_offset_pct), 1)
-    serial_font_name = st.selectbox("Serial font", options=["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"], index=["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"].index(serial_font_name) if serial_font_name in ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"] else 0)
+    serial_font_name = "RedHatMono"  # serials always use Red Hat Mono
     # persist
     st.session_state["qr_size_pct"] = qr_size_pct
     st.session_state["qr_x_offset_pct"] = qr_x_offset_pct
@@ -557,7 +819,7 @@ if enable_preview:
         st.image(_bordered.getvalue(), caption="Live preview (PNG)", width=420)
 # ---------- End Preview ----------
 
-st.subheader("2) Generate Stickers")
+st.subheader("3) Generate Stickers")
 if st.button("Generate") and csv_file:
     try:
         csv_file.seek(0)
