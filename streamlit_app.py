@@ -486,18 +486,25 @@ def compose_hex_l_z(serial, qr_img, dpi=600, font_name="RedHatMono"):
     out.seek(0)
     return out
 
-def compose_hex_t_s(serial, qr_img, dpi=600, font_name="RedHatMono"):
-    """60 × 20 mm landscape label: rounded border, QR left, serial right (vertically centered).
-    Returns PNG bytes."""
+def compose_hex_t_s(serial, qr_img, bg_img=None, dpi=600, font_name="RedHatMono"):
+    """60 × 20 mm landscape label. When bg_img is given it is used as the full label
+    design (border, title, cert icons and badge already baked in); the QR is overlaid
+    on the left and the serial to its right. Falls back to a plain rounded-border
+    label when no background is available. Returns PNG bytes."""
     w = mm_to_px(60, dpi)
     h = mm_to_px(20, dpi)
-    canvas_img = Image.new("RGB", (w, h), (255, 255, 255))
+
+    if bg_img is not None:
+        canvas_img = bg_img.convert("RGB").resize((w, h), Image.LANCZOS)
+    else:
+        canvas_img = Image.new("RGB", (w, h), (255, 255, 255))
     draw = ImageDraw.Draw(canvas_img)
 
-    # Rounded border
-    bw = max(2, int(round(0.012 * h)))
-    radius = int(round(0.14 * h))
-    draw.rounded_rectangle([bw, bw, w - 1 - bw, h - 1 - bw], radius=radius, outline=(0, 0, 0), width=bw)
+    if bg_img is None:
+        # Only draw our own border when we're building the label from scratch.
+        bw = max(2, int(round(0.012 * h)))
+        radius = int(round(0.14 * h))
+        draw.rounded_rectangle([bw, bw, w - 1 - bw, h - 1 - bw], radius=radius, outline=(0, 0, 0), width=bw)
 
     pad = int(round(0.10 * h))
     inner_h = h - 2 * pad
@@ -509,14 +516,12 @@ def compose_hex_t_s(serial, qr_img, dpi=600, font_name="RedHatMono"):
     qr_y = (h - qr_side) // 2
     canvas_img.paste(qr_resized, (qr_x, qr_y))
 
-    # Text block to the right of the QR — serial only, vertically centered
+    # Serial to the right of the QR, top-aligned above the baked-in subtitle
     text_x = qr_x + qr_side + int(round(0.03 * w))
     text_w = max(1, (w - pad) - text_x)
-
-    serial_h = int(round(inner_h * 0.55))
+    serial_h = int(round(inner_h * 0.42))
     sfont = fit_font_height(draw, serial, font_name, serial_h, text_w)
-    text_cy = h // 2
-    draw.text((text_x, text_cy), serial, fill="black", font=sfont, anchor="lm")
+    draw.text((text_x, qr_y), serial, fill="black", font=sfont, anchor="la")
 
     out = BytesIO()
     canvas_img.save(out, format="PNG")
@@ -539,6 +544,14 @@ if tpl["kind"] != "hexf":
             pass
         return None, None
 
+    # HEX-T-S: bundled full-label background design (title/certs/badge baked in).
+    _hts_bg = None
+    if tpl["kind"] == "hts" and os.path.exists("hex_t_s_bg.png"):
+        try:
+            _hts_bg = Image.open("hex_t_s_bg.png").convert("RGB")
+        except Exception:
+            _hts_bg = None
+
     def _build_qr_for(url):
         # HEX-T-S uses a clean white QR background (no grey); others keep the default.
         back_color = "white" if tpl["kind"] == "hts" else "#E3E3E3"
@@ -554,7 +567,7 @@ if tpl["kind"] != "hexf":
     def _compose_one(serial, url, font_name):
         q = _build_qr_for(url)
         if tpl["kind"] == "hts":
-            return compose_hex_t_s(serial, q, dpi=dpi, font_name=font_name)
+            return compose_hex_t_s(serial, q, bg_img=_hts_bg, dpi=dpi, font_name=font_name)
         return compose_hex_l_z(serial, q, dpi=dpi, font_name=font_name)
 
     st.subheader("3) Preview")
