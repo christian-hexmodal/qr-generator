@@ -601,18 +601,21 @@ if tpl["kind"] != "hexf":
                 zip_mem = BytesIO()
                 zf = zipfile.ZipFile(zip_mem, mode="w", compression=zipfile.ZIP_DEFLATED)
                 pcols = st.columns(3)
+                total = len(df)
+                progress = st.progress(0.0, text="Generating stickers…")
                 n = 0
-                for _, row in df.iterrows():
+                for pos, (_, row) in enumerate(df.iterrows()):
                     serial = str(row["Serial"]).strip()
                     url = str(row["Url"]).strip()
-                    if not serial or not url:
-                        continue
-                    png = _compose_one(serial, url, nt_font)
-                    zf.writestr(f"{serial}_sticker.png", png.getvalue())
-                    if n < 3:
-                        with pcols[n % 3]:
-                            st.image(png.getvalue(), caption=serial, width=240)
-                    n += 1
+                    if serial and url:
+                        png = _compose_one(serial, url, nt_font)
+                        zf.writestr(f"{serial}_sticker.png", png.getvalue())
+                        if n < 3:
+                            with pcols[n % 3]:
+                                st.image(png.getvalue(), caption=serial, width=240)
+                        n += 1
+                    progress.progress((pos + 1) / total, text=f"Generating stickers… {pos + 1}/{total}")
+                progress.empty()
                 zf.close()
                 st.success(f"Done! {n} sticker(s) generated.")
                 st.download_button("📦 Download PNGs ZIP", data=zip_mem.getvalue(),
@@ -829,38 +832,42 @@ if st.button("Generate") and csv_file:
             _px_for_gen = int(sticker_size_cm / 2.54 * dpi)
             _qr_draw_override_px_slider = int(qr_size_pct / 100.0 * _px_for_gen)
 
-            for i, row in df.iterrows():
+            total = len(df)
+            progress = st.progress(0.0, text="Generating stickers…")
+
+            for pos, (i, row) in enumerate(df.iterrows()):
                 serial = str(row["Serial"]).strip()
                 url = str(row["Url"]).strip()
-                if not serial or not url:
-                    continue
+                if serial and url:
+                    qr = make_qr(url, ec_level, box_size=box_size, border=2)
+                    if logo_img:
+                        qr = paste_logo_hex(qr, logo_img, logo_frac=logo_scale/100.0, padding=cutout_padding)
 
-                qr = make_qr(url, ec_level, box_size=box_size, border=2)
-                if logo_img:
-                    qr = paste_logo_hex(qr, logo_img, logo_frac=logo_scale/100.0, padding=cutout_padding)
+                    jpg_bytes, _ = compose_sticker(
+                        serial, qr,
+                        sticker_cm=sticker_size_cm,
+                        serial_width_ratio=0.5,
+                        dpi=dpi,
+                        background_img=background_img,
+                        qr_x_offset_pct=qr_x_offset_pct,
+                        qr_y_offset_pct=qr_y_offset_pct,
+                        serial_y_offset_pct=serial_y_offset_pct,
+                        qr_draw_override_px=_qr_draw_override_px_slider,
+                        serial_font_name=serial_font_name,
+                        serial_font_px=serial_font_px,
+                        serial_x_offset_pct=serial_x_offset_pct,
+                        serial_abs_anchor="lt"
+                    )
 
-                jpg_bytes, _ = compose_sticker(
-                    serial, qr,
-                    sticker_cm=sticker_size_cm,
-                    serial_width_ratio=0.5,
-                    dpi=dpi,
-                    background_img=background_img,
-                    qr_x_offset_pct=qr_x_offset_pct,
-                    qr_y_offset_pct=qr_y_offset_pct,
-                    serial_y_offset_pct=serial_y_offset_pct,
-                    qr_draw_override_px=_qr_draw_override_px_slider,
-                    serial_font_name=serial_font_name,
-                    serial_font_px=serial_font_px,
-                    serial_x_offset_pct=serial_x_offset_pct,
-                    serial_abs_anchor="lt"
-                )
+                    jpg_zip.writestr(f"{serial}_sticker.jpg", jpg_bytes.getvalue())
 
-                jpg_zip.writestr(f"{serial}_sticker.jpg", jpg_bytes.getvalue())
+                    if pos < 3:
+                        with preview_cols[pos % 3]:
+                            st.image(jpg_bytes.getvalue(), caption=serial, width=240)
 
-                if i < 3:
-                    with preview_cols[i % 3]:
-                        st.image(jpg_bytes.getvalue(), caption=serial, width=240)
+                progress.progress((pos + 1) / total, text=f"Generating stickers… {pos + 1}/{total}")
 
+            progress.empty()
             jpg_zip.close()
 
             st.success("Done! Download your files below.")
