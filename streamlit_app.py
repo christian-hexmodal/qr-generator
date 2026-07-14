@@ -76,13 +76,8 @@ csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
 logo_file = st.file_uploader("Black Hexmodal logo (PNG) — optional", type=["png"])
 
 bg_file = None
-subtitle_text = ""
-cert_file = None
 if tpl["kind"] == "hexf":
     bg_file = st.file_uploader("Background template (PNG/JPG) — optional", type=["png","jpg","jpeg"])
-elif tpl["kind"] == "hts":
-    subtitle_text = st.text_input("Subtitle (fixed for this batch)", value="Smart Temperature Monitor")
-    cert_file = st.file_uploader("Certification icons strip (PNG, transparent) — optional; defaults to bundled cert_icons.png", type=["png"])
 
 # Helpers
 def hex_points(size):
@@ -126,7 +121,7 @@ def add_border_to_png(png_bytes: bytes, border_px: int = 2, color=(0, 0, 0, 255)
         bio.seek(0)
         return bio
 
-def make_qr(data, error_correction, box_size=20, border=2):
+def make_qr(data, error_correction, box_size=20, border=2, back_color="#E3E3E3"):
     ec_map = {"L": qrcode.constants.ERROR_CORRECT_L,
               "M": qrcode.constants.ERROR_CORRECT_M,
               "Q": qrcode.constants.ERROR_CORRECT_Q,
@@ -139,7 +134,7 @@ def make_qr(data, error_correction, box_size=20, border=2):
     )
     qr.add_data(data)
     qr.make(fit=True)
-    return qr.make_image(fill_color="black", back_color="#E3E3E3").convert("RGBA")
+    return qr.make_image(fill_color="black", back_color=back_color).convert("RGBA")
 
 def paste_logo_hex(qr_img, logo_img, logo_frac=0.25, padding=1.2):
     """Clear a hexagonal area and paste the logo inside it."""
@@ -491,9 +486,8 @@ def compose_hex_l_z(serial, qr_img, dpi=600, font_name="RedHatMono"):
     out.seek(0)
     return out
 
-def compose_hex_t_s(serial, qr_img, subtitle="", cert_img=None, dpi=600,
-                    font_name="RedHatMono", subtitle_font_name="DejaVuSans"):
-    """60 × 20 mm landscape label: rounded border, QR left, serial + subtitle + cert icons right.
+def compose_hex_t_s(serial, qr_img, dpi=600, font_name="RedHatMono"):
+    """60 × 20 mm landscape label: rounded border, QR left, serial right (vertically centered).
     Returns PNG bytes."""
     w = mm_to_px(60, dpi)
     h = mm_to_px(20, dpi)
@@ -515,34 +509,14 @@ def compose_hex_t_s(serial, qr_img, subtitle="", cert_img=None, dpi=600,
     qr_y = (h - qr_side) // 2
     canvas_img.paste(qr_resized, (qr_x, qr_y))
 
-    # Text block to the right of the QR
+    # Text block to the right of the QR — serial only, vertically centered
     text_x = qr_x + qr_side + int(round(0.03 * w))
     text_w = max(1, (w - pad) - text_x)
-    top = qr_y
 
-    # Reserve stacked line boxes: serial (top), subtitle (mid), cert icons (bottom)
-    serial_h = int(round(inner_h * 0.50))
-    sub_h = int(round(inner_h * 0.22))
-    cert_h = int(round(inner_h * 0.24))
-
+    serial_h = int(round(inner_h * 0.55))
     sfont = fit_font_height(draw, serial, font_name, serial_h, text_w)
-    draw.text((text_x, top), serial, fill="black", font=sfont, anchor="la")
-
-    if subtitle:
-        sub_y = top + serial_h
-        subfont = fit_font_height(draw, subtitle, subtitle_font_name, sub_h, text_w)
-        draw.text((text_x, sub_y), subtitle, fill=(90, 90, 90), font=subfont, anchor="la")
-
-    if cert_img is not None:
-        cert_top = qr_y + inner_h - cert_h
-        ci = cert_img.convert("RGBA")
-        cw, ch = ci.size
-        if cw > 0 and ch > 0:
-            scale = min(cert_h / float(ch), text_w / float(cw))
-            nw = max(1, int(round(cw * scale)))
-            nh = max(1, int(round(ch * scale)))
-            ci_r = ci.resize((nw, nh), Image.LANCZOS)
-            canvas_img.paste(ci_r, (text_x, cert_top), ci_r)
+    text_cy = h // 2
+    draw.text((text_x, text_cy), serial, fill="black", font=sfont, anchor="lm")
 
     out = BytesIO()
     canvas_img.save(out, format="PNG")
@@ -565,20 +539,10 @@ if tpl["kind"] != "hexf":
             pass
         return None, None
 
-    _cert_img = None
-    if tpl["kind"] == "hts":
-        # Prefer an uploaded strip; otherwise fall back to a bundled default in the repo.
-        _cert_src = cert_file
-        if _cert_src is None and os.path.exists("cert_icons.png"):
-            _cert_src = "cert_icons.png"
-        if _cert_src is not None:
-            try:
-                _cert_img = Image.open(_cert_src).convert("RGBA")
-            except Exception:
-                _cert_img = None
-
     def _build_qr_for(url):
-        q = make_qr(url, ec_level, box_size=box_size, border=2)
+        # HEX-T-S uses a clean white QR background (no grey); others keep the default.
+        back_color = "white" if tpl["kind"] == "hts" else "#E3E3E3"
+        q = make_qr(url, ec_level, box_size=box_size, border=2, back_color=back_color)
         if logo_file:
             try:
                 lg = Image.open(logo_file).convert("RGBA")
@@ -590,8 +554,7 @@ if tpl["kind"] != "hexf":
     def _compose_one(serial, url, font_name):
         q = _build_qr_for(url)
         if tpl["kind"] == "hts":
-            return compose_hex_t_s(serial, q, subtitle=subtitle_text, cert_img=_cert_img,
-                                   dpi=dpi, font_name=font_name)
+            return compose_hex_t_s(serial, q, dpi=dpi, font_name=font_name)
         return compose_hex_l_z(serial, q, dpi=dpi, font_name=font_name)
 
     st.subheader("3) Preview")
