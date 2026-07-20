@@ -28,7 +28,7 @@ FONT_OPTIONS = ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "Red
 TEMPLATES = {
     "HEX-F — portrait sticker": {"kind": "hexf"},
     "HEX-T-S — 60 × 20 mm landscape": {"kind": "hts", "w_mm": 60, "h_mm": 20},
-    "HEX-L-Z — 20 × 20 mm square": {"kind": "hlz", "w_mm": 20, "h_mm": 20},
+    "HEX-L-Z — 20 × 25 mm portrait": {"kind": "hlz", "w_mm": 20, "h_mm": 25},
 }
 
 # ---------- Sidebar (template-aware) ----------
@@ -460,26 +460,29 @@ def fit_font_height(draw, text, name, target_h, max_w, step=2, cap=4000):
 def mm_to_px(mm, dpi):
     return max(1, int(round(mm / 25.4 * dpi)))
 
+HEX_L_Z_BG = (231, 227, 222)  # light warm grey, closer to white
+
 def compose_hex_l_z(serial, qr_img, dpi=600, font_name="RedHatMono"):
-    """20 × 20 mm square label: serial on top, large QR filling the rest. Returns PNG bytes."""
-    side = mm_to_px(20, dpi)
-    canvas_img = Image.new("RGB", (side, side), (255, 255, 255))
+    """20 × 25 mm portrait label: serial on top, large QR filling the rest. Returns PNG bytes."""
+    w = mm_to_px(20, dpi)
+    h = mm_to_px(25, dpi)
+    canvas_img = Image.new("RGB", (w, h), HEX_L_Z_BG)
     draw = ImageDraw.Draw(canvas_img)
 
-    margin = int(round(0.06 * side))
-    text_band = int(round(0.20 * side))
+    margin = int(round(0.06 * w))
+    text_band = int(round(0.16 * h))
 
-    sfont = fit_font(draw, serial, font_name, side - 2 * margin, int(text_band * 0.78))
+    sfont = fit_font(draw, serial, font_name, w - 2 * margin, int(text_band * 0.78))
 
-    avail_h = side - text_band - margin
-    avail_w = side - 2 * margin
+    avail_h = h - text_band - margin
+    avail_w = w - 2 * margin
     qr_side = max(1, min(avail_w, avail_h))
     qr_resized = qr_img.convert("RGB").resize((qr_side, qr_side), Image.NEAREST)
-    qr_x = (side - qr_side) // 2
+    qr_x = (w - qr_side) // 2
     qr_y = text_band + (avail_h - qr_side) // 2
     canvas_img.paste(qr_resized, (qr_x, qr_y))
 
-    draw.text((side // 2, text_band // 2), serial, fill="black", font=sfont, anchor="mm")
+    draw.text((w // 2, text_band // 2), serial, fill="black", font=sfont, anchor="mm")
 
     out = BytesIO()
     canvas_img.save(out, format="PNG")
@@ -553,8 +556,14 @@ if tpl["kind"] != "hexf":
             _hts_bg = None
 
     def _build_qr_for(url):
-        # HEX-T-S uses a clean white QR background (no grey); others keep the default.
-        back_color = "white" if tpl["kind"] == "hts" else "#E3E3E3"
+        # HEX-T-S uses a clean white QR background; HEX-L-Z matches its warm-grey
+        # label so the quiet-zone blends in; others keep the default grey.
+        if tpl["kind"] == "hts":
+            back_color = "white"
+        elif tpl["kind"] == "hlz":
+            back_color = "#%02X%02X%02X" % HEX_L_Z_BG
+        else:
+            back_color = "#E3E3E3"
         q = make_qr(url, ec_level, box_size=box_size, border=2, back_color=back_color)
         if logo_file:
             try:
