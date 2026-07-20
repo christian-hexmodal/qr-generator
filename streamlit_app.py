@@ -26,7 +26,7 @@ st.caption("Upload a CSV of Serial/URL and an optional black Hexmodal logo — g
 # ---------- Template + font config ----------
 FONT_OPTIONS = ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"]
 TEMPLATES = {
-    "HEX-F — portrait sticker": {"kind": "hexf"},
+    "Custom — full control (HEX-F)": {"kind": "hexf"},
     "HEX-T-S — 60 × 20 mm landscape": {"kind": "hts", "w_mm": 60, "h_mm": 20},
     "HEX-L-Z — 20 × 25 mm portrait": {"kind": "hlz", "w_mm": 20, "h_mm": 25},
 }
@@ -62,14 +62,15 @@ else:
     enable_preview = True
     drag_mode = False
 
-# Main-area controls defaults (persist via session_state)
-qr_size_pct = st.session_state.get("qr_size_pct", 80)
+# Main-area controls defaults (persist via session_state) — the Custom (HEX-F)
+# template ships with this dialed-in layout as its starting point.
+qr_size_pct = st.session_state.get("qr_size_pct", 37)
 qr_x_offset_pct = st.session_state.get("qr_x_offset_pct", 0)
-qr_y_offset_pct = st.session_state.get("qr_y_offset_pct", 0)
+qr_y_offset_pct = st.session_state.get("qr_y_offset_pct", -24)
 serial_x_offset_pct = st.session_state.get("serial_x_offset_pct", 0)
-serial_y_offset_pct = st.session_state.get("serial_y_offset_pct", 0)
+serial_y_offset_pct = st.session_state.get("serial_y_offset_pct", 17)
 serial_font_name = "RedHatMono"  # serials always use Red Hat Mono
-serial_font_px = st.session_state.get("serial_font_px", 0)
+serial_font_px = st.session_state.get("serial_font_px", 154)
 
 st.subheader("1) Upload Inputs")
 csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
