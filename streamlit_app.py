@@ -25,8 +25,16 @@ st.caption("Upload a CSV of Serial/URL and an optional black Hexmodal logo — g
 
 # ---------- Template + font config ----------
 FONT_OPTIONS = ["Helvetica-Bold", "Arial", "DejaVuSans-Bold", "DejaVuSans", "RedHatMono"]
+# Full-flexibility defaults for the Custom template (everything open, auto-fit serial).
+_CUSTOM_LAYOUT = {"qr_size_pct": 80, "qr_x_offset_pct": 0, "qr_y_offset_pct": 0,
+                  "serial_x_offset_pct": 0, "serial_y_offset_pct": 0, "serial_font_px": 0}
+# HEX-F ships with this dialed-in portrait layout as its starting point.
+_HEXF_LAYOUT = {"qr_size_pct": 37, "qr_x_offset_pct": 0, "qr_y_offset_pct": -24,
+                "serial_x_offset_pct": 0, "serial_y_offset_pct": 17, "serial_font_px": 154}
+
 TEMPLATES = {
-    "Custom — full control (HEX-F)": {"kind": "hexf"},
+    "Custom — full control": {"kind": "hexf", "layout": _CUSTOM_LAYOUT},
+    "HEX-F — portrait sticker": {"kind": "hexf", "layout": _HEXF_LAYOUT},
     "HEX-T-S — 60 × 20 mm landscape": {"kind": "hts", "w_mm": 60, "h_mm": 20},
     "HEX-L-Z — 20 × 25 mm portrait": {"kind": "hlz", "w_mm": 20, "h_mm": 25},
 }
@@ -35,6 +43,13 @@ TEMPLATES = {
 st.sidebar.header("Template")
 template_label = st.sidebar.selectbox("Template", list(TEMPLATES.keys()))
 tpl = TEMPLATES[template_label]
+
+# When the selected template changes, load that template's starting layout so
+# each preset (Custom vs HEX-F) opens with its own dialed-in slider values.
+if st.session_state.get("_active_template") != template_label:
+    st.session_state["_active_template"] = template_label
+    for _k, _v in tpl.get("layout", {}).items():
+        st.session_state[_k] = _v
 
 st.sidebar.header("Output")
 dpi = st.sidebar.selectbox("PNG Export DPI", options=[300, 450, 600, 900], index=2)
@@ -62,15 +77,16 @@ else:
     enable_preview = True
     drag_mode = False
 
-# Main-area controls defaults (persist via session_state) — the Custom (HEX-F)
-# template ships with this dialed-in layout as its starting point.
-qr_size_pct = st.session_state.get("qr_size_pct", 37)
-qr_x_offset_pct = st.session_state.get("qr_x_offset_pct", 0)
-qr_y_offset_pct = st.session_state.get("qr_y_offset_pct", -24)
-serial_x_offset_pct = st.session_state.get("serial_x_offset_pct", 0)
-serial_y_offset_pct = st.session_state.get("serial_y_offset_pct", 17)
+# Main-area controls (persist via session_state). Defaults fall back to the
+# active template's layout so Custom and HEX-F each open with their own values.
+_layout = tpl.get("layout", _CUSTOM_LAYOUT)
+qr_size_pct = st.session_state.get("qr_size_pct", _layout["qr_size_pct"])
+qr_x_offset_pct = st.session_state.get("qr_x_offset_pct", _layout["qr_x_offset_pct"])
+qr_y_offset_pct = st.session_state.get("qr_y_offset_pct", _layout["qr_y_offset_pct"])
+serial_x_offset_pct = st.session_state.get("serial_x_offset_pct", _layout["serial_x_offset_pct"])
+serial_y_offset_pct = st.session_state.get("serial_y_offset_pct", _layout["serial_y_offset_pct"])
 serial_font_name = "RedHatMono"  # serials always use Red Hat Mono
-serial_font_px = st.session_state.get("serial_font_px", 154)
+serial_font_px = st.session_state.get("serial_font_px", _layout["serial_font_px"])
 
 st.subheader("1) Upload Inputs")
 csv_file = st.file_uploader("CSV with columns: Serial, URL", type=["csv"])
