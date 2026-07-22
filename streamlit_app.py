@@ -37,6 +37,7 @@ TEMPLATES = {
     "HEX-F — portrait sticker": {"kind": "hexf", "layout": _HEXF_LAYOUT},
     "HEX-T-S — 60 × 20 mm landscape": {"kind": "hts", "w_mm": 60, "h_mm": 20},
     "HEX-L-Z — 20 × 25 mm portrait": {"kind": "hlz", "w_mm": 20, "h_mm": 25},
+    "HEX-T — 18 × 23 mm portrait": {"kind": "het", "w_mm": 18, "h_mm": 23},
 }
 
 # ---------- Sidebar (template-aware) ----------
@@ -479,10 +480,12 @@ def mm_to_px(mm, dpi):
 
 HEX_L_Z_BG = (231, 227, 222)  # light warm grey, closer to white
 
-def compose_hex_l_z(serial, qr_img, dpi=600, font_name="RedHatMono"):
-    """20 × 25 mm portrait label: serial on top, large QR filling the rest. Returns PNG bytes."""
-    w = mm_to_px(20, dpi)
-    h = mm_to_px(25, dpi)
+def compose_hex_l_z(serial, qr_img, dpi=600, font_name="RedHatMono", w_mm=20, h_mm=25):
+    """Portrait warm-grey label: serial on top, large QR filling the rest. Returns PNG bytes.
+
+    Shared by HEX-L-Z (20 × 25 mm) and HEX-T (18 × 23 mm)."""
+    w = mm_to_px(w_mm, dpi)
+    h = mm_to_px(h_mm, dpi)
     canvas_img = Image.new("RGB", (w, h), HEX_L_Z_BG)
     draw = ImageDraw.Draw(canvas_img)
 
@@ -573,11 +576,11 @@ if tpl["kind"] != "hexf":
             _hts_bg = None
 
     def _build_qr_for(url):
-        # HEX-T-S uses a clean white QR background; HEX-L-Z matches its warm-grey
-        # label so the quiet-zone blends in; others keep the default grey.
+        # HEX-T-S uses a clean white QR background; HEX-L-Z / HEX-T match their
+        # warm-grey label so the quiet-zone blends in; others keep default grey.
         if tpl["kind"] == "hts":
             back_color = "white"
-        elif tpl["kind"] == "hlz":
+        elif tpl["kind"] in ("hlz", "het"):
             back_color = "#%02X%02X%02X" % HEX_L_Z_BG
         else:
             back_color = "#E3E3E3"
@@ -594,7 +597,8 @@ if tpl["kind"] != "hexf":
         q = _build_qr_for(url)
         if tpl["kind"] == "hts":
             return compose_hex_t_s(serial, q, bg_img=_hts_bg, dpi=dpi, font_name=font_name)
-        return compose_hex_l_z(serial, q, dpi=dpi, font_name=font_name)
+        return compose_hex_l_z(serial, q, dpi=dpi, font_name=font_name,
+                               w_mm=tpl["w_mm"], h_mm=tpl["h_mm"])
 
     st.subheader("3) Preview")
     nt_font = "RedHatMono"  # serials always use Red Hat Mono
